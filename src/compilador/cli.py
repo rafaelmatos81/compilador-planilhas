@@ -22,7 +22,7 @@ def compile(
     sample: Optional[int] = typer.Option(None, help="Processar apenas N arquivos (modo teste)"),
     recursive: bool = typer.Option(True, help="Busca recursiva"),
     dry_run: bool = typer.Option(False, help="Apenas identifica, sem escrever saída"),
-    confidence_threshold: float = typer.Option(0.40, help="Confiança mínima para extração"),
+    confidence_threshold: float = typer.Option(0.60, help="Confiança mínima para extração"),
 ) -> None:
     """Compilar arquivos .xlsx em um único arquivo consolidado."""
     from .compiler.walker import compile_iter
@@ -42,12 +42,7 @@ def compile(
             r = event.result
             if r:
                 all_results.append(r)
-                if hasattr(r, "_canonical_rows"):
-                    rows = r._canonical_rows  # type: ignore[attr-defined]
-                    for row in rows:
-                        row.confidence = r.confidence
-                        row.needs_review = r.needs_review
-                    all_rows.extend(rows)
+                all_rows.extend(r.rows)
             console.log(f"{r.icon if r else '?'}  {event.filename}  [{event.current}/{event.total}]")
 
     if not dry_run:

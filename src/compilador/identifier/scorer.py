@@ -8,7 +8,8 @@ def score_all(table: ParsedTable, catalog: CatalogManifest) -> list[ScoredMatch]
     """Score table against all catalog entries. Returns sorted list (highest first)."""
     norm_rows = [normalize_row(row) for row in table.rows]
     results = [_score_entry(norm_rows, entry) for entry in catalog.formats]
-    results.sort(key=lambda m: m.confidence, reverse=True)
+    # Em empate, vence o modelo que casou mais âncoras (o mais específico)
+    results.sort(key=lambda m: (m.confidence, len(m.matched_anchors)), reverse=True)
     return results
 
 
@@ -31,16 +32,25 @@ def _score_entry(norm_rows: list[list[str]], entry: FormatEntry) -> ScoredMatch:
             matched.append(f"header:{anchor.text[:20]}")
         earned += anchor.weight * score
 
-    header_idx = find_header_row_index(norm_rows)
-    header_row = norm_rows[header_idx] if header_idx < len(norm_rows) else []
-    for anchor in entry.detection.column_anchors:
-        max_possible += anchor.weight
-        score = _score_column_anchor(header_row, anchor)
-        if anchor.required and score == 0:
+    if entry.detection.column_anchors:
+        # A linha de cabeçalho pode variar entre arquivos do mesmo modelo: testa a
+        # detectada automaticamente e a configurada no modelo, e fica com a melhor.
+        candidates = {find_header_row_index(norm_rows)}
+        configured = entry.extraction.header_row - 1
+        if 0 <= configured < len(norm_rows):
+            candidates.add(configured)
+        best = None
+        for idx in sorted(candidates):
+            header_row = norm_rows[idx] if idx < len(norm_rows) else []
+            cand = _score_columns(entry.detection.column_anchors, header_row)
+            if best is None or (not cand[3], cand[0]) > (not best[3], best[0]):
+                best = cand
+        col_earned, col_max, col_matched, col_missing = best
+        if col_missing:
             return ScoredMatch(format_id=entry.format_id, confidence=0.0)
-        if score > 0:
-            matched.append(f"col:{anchor.canonical_name}")
-        earned += anchor.weight * score
+        earned += col_earned
+        max_possible += col_max
+        matched += col_matched
 
     for anchor in entry.detection.cell_anchors:
         max_possible += anchor.weight
@@ -60,6 +70,24 @@ def _score_entry(norm_rows: list[list[str]], entry: FormatEntry) -> ScoredMatch:
 
     confidence = min(1.0, earned / max_possible)
     return ScoredMatch(format_id=entry.format_id, confidence=confidence, matched_anchors=matched)
+
+
+def _score_columns(
+    anchors: list[ColumnAnchor], header_row: list[str]
+) -> tuple[float, float, list[str], bool]:
+    """Returns (earned, max_possible, matched, missing_required)."""
+    earned = max_possible = 0.0
+    matched: list[str] = []
+    missing = False
+    for anchor in anchors:
+        max_possible += anchor.weight
+        score = _score_column_anchor(header_row, anchor)
+        if anchor.required and score == 0:
+            missing = True
+        if score > 0:
+            matched.append(f"col:{anchor.canonical_name}")
+        earned += anchor.weight * score
+    return earned, max_possible, matched, missing
 
 
 def _score_header_anchor(norm_rows: list[list[str]], anchor: HeaderAnchor) -> float:

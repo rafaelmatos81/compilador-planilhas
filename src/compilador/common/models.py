@@ -60,6 +60,10 @@ class FileResult:
     needs_review: bool = False
     error: Optional[str] = None
     skipped: bool = False
+    rows: list[CanonicalRow] = field(default_factory=list, repr=False)
+    # Layout da planilha (usado para agrupar arquivos ainda sem modelo cadastrado)
+    layout_key: str = ""
+    sheet_name: str = ""
 
     @property
     def status(self) -> str:
@@ -67,7 +71,7 @@ class FileResult:
             return "error"
         if self.skipped:
             return "skipped"
-        if self.confidence < 0.40:
+        if self.format_id is None:
             return "unidentified"
         if self.needs_review or self.confidence < 0.85:
             return "review"

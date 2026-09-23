@@ -44,11 +44,163 @@ def _load_catalog():
     return load_catalog()
 
 
+# ── Aprendizado de modelo (usado na aba "Novo modelo" e na compilação) ────────
+
+@st.cache_data(show_spinner=False)
+def _read_tables(path: str, mtime: float):
+    from compilador.compiler.reader import read_xlsx
+    return read_xlsx(Path(path))
+
+
+def _save_upload(uploaded) -> Path:
+    folder = Path(st.session_state.setdefault("_upload_dir", tempfile.mkdtemp(prefix="compilador_")))
+    path = folder / uploaded.name
+    data = uploaded.getvalue()
+    if not path.exists() or path.stat().st_size != len(data):
+        path.write_bytes(data)
+    return path
+
+
+def _learn_ui(path: Path, key: str, sheet_hint: str = "", check_existing: bool = False):
+    """Interface para ensinar um modelo a partir de uma planilha de exemplo.
+
+    Retorna o FormatEntry salvo (na execução em que o usuário clica em salvar) ou None.
+    """
+    from compilador import learner
+    from compilador.catalog.loader import append_format, load_catalog
+    from compilador.catalog.schema import add_field, load_schema
+    from compilador.common.exceptions import CatalogError
+    from compilador.compiler.extractor import extract
+    from compilador.config import settings
+
+    try:
+        tables = _read_tables(str(path), path.stat().st_mtime)
+    except Exception as e:
+        st.error(f"Não foi possível ler {path.name}: {e}")
+        return None
+    if not tables:
+        st.warning(f"{path.name} não tem nenhuma aba com conteúdo.")
+        return None
+
+    schema = load_schema()
+    catalog = load_catalog()
+
+    names = [t.sheet_name for t in tables]
+    table = tables[0]
+    if len(tables) > 1:
+        default = names.index(sheet_hint) if sheet_hint in names else 0
+        table = tables[names.index(st.selectbox("Aba da planilha", names, index=default, key=f"{key}_sheet"))]
+    sheet = table.sheet_name
+
+    if check_existing:
+        from compilador.identifier.scorer import best_match
+        match = best_match(table, catalog)
+        if match and match.confidence >= settings.confidence_medium:
+            st.info(
+                f"Esta planilha já é reconhecida pelo modelo **{match.format_id}** "
+                f"(confiança {match.confidence:.2f}). Cadastre outro modelo só se quiser um mapeamento diferente."
+            )
+
+    st.markdown("**1. Onde estão os títulos das colunas?**")
+    detected = learner.detect_header_row(table)
+    header_row = st.number_input(
+        "Linha do cabeçalho", min_value=1, max_value=len(table.rows), value=detected + 1,
+        key=f"{key}_hdr_{sheet}", help="Detectada automaticamente; ajuste se estiver errada.",
+    )
+    header_idx = int(header_row) - 1
+    preview = pd.DataFrame(table.rows[: max(15, header_idx + 6)])
+    preview.index = range(1, len(preview) + 1)
+    st.dataframe(preview, use_container_width=True)
+
+    infos = learner.describe_columns(table, header_idx, schema)
+    if not infos:
+        st.error("A linha escolhida não tem títulos de coluna.")
+        return None
+
+    st.markdown("**2. A qual coluna padrão corresponde cada coluna da planilha?**")
+    options = [None, *schema.names()]
+    h1, h2, h3 = st.columns([2, 3, 3])
+    h1.caption("Coluna na planilha")
+    h2.caption("Exemplos")
+    h3.caption("Coluna padrão")
+    mapping: dict[int, str] = {}
+    for info in infos:
+        c1, c2, c3 = st.columns([2, 3, 3])
+        c1.markdown(f"**{info.header}**")
+        c2.caption(" · ".join(info.samples) or "(vazia)")
+        choice = c3.selectbox(
+            "Coluna padrão", options,
+            index=options.index(info.suggestion) if info.suggestion in options else 0,
+            format_func=lambda n: "— ignorar —" if n is None else schema.label(n),
+            key=f"{key}_map_{sheet}_{header_row}_{info.index}",
+            label_visibility="collapsed",
+        )
+        if choice:
+            mapping[info.index] = choice
+
+    with st.expander("➕ Preciso de uma coluna padrão que não existe"):
+        n1, n2, n3 = st.columns([3, 2, 1])
+        new_label = n1.text_input("Nome da nova coluna", key=f"{key}_newlabel")
+        type_label = n2.selectbox("Tipo", ["Texto", "Número", "Data"], key=f"{key}_newtype")
+        n3.write("")
+        if n3.button("Criar", key=f"{key}_newbtn"):
+            try:
+                add_field(new_label, {"Texto": "text", "Número": "number", "Data": "date"}[type_label])
+                st.rerun()
+            except CatalogError as e:
+                st.error(str(e))
+        st.caption("Depois de criar, escolha a nova coluna na lista de uma das colunas acima.")
+
+    st.markdown("**3. Nome do modelo**")
+    n1, n2, n3 = st.columns(3)
+    name = n1.text_input("Nome do modelo *", value=path.stem, key=f"{key}_name")
+    agency = n2.text_input("Órgão / fonte (opcional)", key=f"{key}_agency")
+    doc_type = n3.text_input("Tipo de documento (opcional)", key=f"{key}_doctype")
+    skip_text = st.text_input(
+        "Ignorar linhas cuja primeira célula contenha", value=", ".join(learner.DEFAULT_SKIP_ROWS),
+        key=f"{key}_skip", help="Separe por vírgula. Útil para linhas de total e subtotal.",
+    )
+
+    values = list(mapping.values())
+    if len(values) != len(set(values)):
+        st.error("Uma mesma coluna padrão foi escolhida para mais de uma coluna da planilha.")
+        return None
+
+    entry = None
+    if mapping and name.strip():
+        entry = learner.build_format(
+            table, header_idx, mapping, name=name, agency=agency, document_type=doc_type,
+            skip_rows=[s.strip() for s in skip_text.split(",") if s.strip()],
+            description=f"Aprendido de {path.name}", existing_ids=catalog.ids(),
+        )
+        extracted = extract(table, entry)
+        st.markdown(f"**Prévia:** {len(extracted)} linha(s) seriam extraídas desta planilha.")
+        if extracted:
+            st.dataframe(
+                pd.DataFrame([r.data for r in extracted[:10]]).rename(columns=schema.label),
+                use_container_width=True, hide_index=True,
+            )
+        else:
+            st.warning("Nenhuma linha de dados foi extraída. Confira a linha do cabeçalho e o mapeamento.")
+
+    if st.button("💾 Salvar modelo", type="primary", key=f"{key}_save", disabled=entry is None):
+        append_format(entry)
+        return entry
+    return None
+
+
 # ── Tab 1: Compilar .xlsx ─────────────────────────────────────────────────────
+
+_COMP = "compilacao"
+
 
 def tab_compilar():
     st.header("📊 Compilar arquivos .xlsx")
-    st.markdown("Selecione uma pasta local. O sistema identificará cada arquivo automaticamente e consolidará tudo em um único `.xlsx` com rastreabilidade.")
+    st.markdown(
+        "Selecione uma pasta local. Cada arquivo é reconhecido pelo modelo cadastrado e suas colunas "
+        "são levadas para as **colunas padrão**, tudo em um único `.xlsx`. Arquivos de modelos ainda "
+        "desconhecidos aparecem agrupados para você cadastrar o modelo na hora."
+    )
 
     col1, col2 = st.columns([3, 1])
     with col1:
@@ -58,133 +210,149 @@ def tab_compilar():
             help="Caminho absoluto da pasta com os arquivos .xlsx",
         )
     with col2:
-        sample = st.number_input("Modo teste (N arquivos)", min_value=0, value=0, step=1,
-                                  help="0 = processar todos. Use um número pequeno para testar antes do lote completo.")
+        st.write("")
+        recursive = st.checkbox("Incluir subpastas", value=True)
 
-    col3, col4, col5 = st.columns(3)
-    with col3:
-        recursive = st.checkbox("Busca recursiva em subpastas", value=True)
-    with col4:
-        dry_run = st.checkbox("Dry run (não escreve saída)", value=False)
-    with col5:
-        confidence_threshold = st.slider("Confiança mínima", 0.0, 1.0, 0.40, 0.05)
+    if st.button("▶ Iniciar compilação", type="primary", use_container_width=True):
+        if not input_dir or not Path(input_dir).is_dir():
+            st.error("Pasta não encontrada. Verifique o caminho informado.")
+        else:
+            _run_compilacao(Path(input_dir), recursive)
 
-    iniciar = st.button("▶ Iniciar compilação", type="primary", use_container_width=True)
+    comp = st.session_state.get(_COMP)
+    if comp:
+        _render_compilacao(comp)
 
-    if not iniciar:
-        return
 
-    if not input_dir or not Path(input_dir).is_dir():
-        st.error("Pasta não encontrada. Verifique o caminho informado.")
-        return
+def _run_compilacao(input_dir: Path, recursive: bool) -> None:
+    from compilador.catalog.loader import load_catalog
+    from compilador.compiler.walker import list_xlsx, process_files
 
-    from compilador.compiler.walker import compile_iter
-    from compilador.compiler.assembler import assemble_output
-    from compilador.common.models import CanonicalRow, FileResult
-
-    # Discover file count first for accurate total
-    pattern = "**/*.xlsx" if recursive else "*.xlsx"
-    all_files = sorted(Path(input_dir).glob(pattern))
-    n_sample = int(sample) if sample > 0 else None
-    files_to_process = all_files[:n_sample] if n_sample else all_files
-    total = len(files_to_process)
-
+    files = list_xlsx(input_dir, recursive)
+    total = len(files)
     if total == 0:
+        st.session_state.pop(_COMP, None)
         st.warning("Nenhum arquivo .xlsx encontrado na pasta informada.")
         return
 
-    st.markdown(f"**{total} arquivo(s) encontrado(s)**{' (modo teste)' if n_sample else ''}")
-
-    progress_total = st.progress(0, text="📊 Progresso geral: 0 / " + str(total))
-    current_file_text = st.empty()
+    progress = st.progress(0, text=f"📊 Progresso geral: 0 / {total}")
+    current_file = st.empty()
     log_placeholder = st.empty()
-
-    all_rows: list[CanonicalRow] = []
-    all_results: list[FileResult] = []
-    log_rows: list[dict] = []
-
-    for event in compile_iter(
-        input_dir,
-        sample=n_sample,
-        recursive=recursive,
-        confidence_threshold=confidence_threshold,
-    ):
+    results, log_rows = [], []
+    for event in process_files(files, load_catalog()):
         r = event.result
-        if r:
-            all_results.append(r)
-            if hasattr(r, "_canonical_rows"):
-                rows = r._canonical_rows  # type: ignore[attr-defined]
-                for row in rows:
-                    row.confidence = r.confidence
-                    row.needs_review = r.needs_review
-                all_rows.extend(rows)
-            log_rows.append({
-                "status": _status_icon(r.status),
-                "arquivo": Path(r.path).name,
-                "formato": r.format_id or "—",
-                "confiança": f"{r.confidence:.2f}" if r.confidence > 0 else "—",
-                "linhas": r.rows_extracted,
-                "ocr": "✓" if r.ocr_used else "",
-                "erro": r.error or "",
-            })
+        results.append(r)
+        log_rows.append({
+            "status": _status_icon(r.status),
+            "arquivo": Path(r.path).name,
+            "formato": r.format_id or "—",
+            "linhas": r.rows_extracted,
+            "erro": r.error or "",
+        })
+        progress.progress(event.fraction, text=f"📊 Progresso geral: {event.current} / {event.total}")
+        current_file.caption(f"📄 Arquivo atual: **{event.filename}**")
+        log_placeholder.dataframe(pd.DataFrame(log_rows), use_container_width=True, hide_index=True)
 
-        progress_total.progress(
-            event.fraction,
-            text=f"📊 Progresso geral: {event.current} / {event.total}",
-        )
-        current_file_text.caption(f"📄 Arquivo atual: **{event.filename}**")
+    st.session_state[_COMP] = {"results": results, "xlsx": None}
+    st.rerun()
 
-        if log_rows:
-            log_df = pd.DataFrame(log_rows)
-            with log_placeholder.container():
-                st.dataframe(log_df, use_container_width=True, hide_index=True)
 
-    current_file_text.empty()
-    progress_total.progress(1.0, text="✅ Concluído!")
+def _reprocess_pending(comp: dict) -> None:
+    """Reprocessa só os arquivos ainda sem modelo (após cadastrar um modelo novo)."""
+    from compilador.catalog.loader import load_catalog
+    from compilador.compiler.walker import process_files
 
-    # Summary metrics
+    pending = [Path(r.path) for r in comp["results"] if r.status == "unidentified"]
+    updated = {e.result.path: e.result for e in process_files(pending, load_catalog())}
+    comp["results"] = [updated.get(r.path, r) for r in comp["results"]]
+    comp["xlsx"] = None
+
+
+def _render_compilacao(comp: dict) -> None:
+    from compilador.compiler.assembler import assemble_output
+
+    results = comp["results"]
     st.divider()
     st.subheader("📋 Resumo do processamento")
-    counts = Counter(r.status for r in all_results)
+    counts = Counter(r.status for r in results)
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("✅ Identificados", counts["ok"])
-    m2.metric("⚠️ Revisão necessária", counts["review"])
-    m3.metric("❌ Não identificados", counts["unidentified"])
-    m4.metric("💥 Erros", counts["error"])
+    m1.metric("✅ Reconhecidos", counts["ok"])
+    m2.metric("⚠️ Revisão recomendada", counts["review"])
+    m3.metric("🆕 Sem modelo cadastrado", counts["unidentified"])
+    m4.metric("💥 Erros", counts["error"] + counts["skipped"])
 
-    # Format breakdown
-    fmt_counts: Counter = Counter(r.format_id for r in all_results if r.format_id)
-    if fmt_counts:
-        st.markdown("**Por formato:**")
-        fmt_df = pd.DataFrame(
-            [{"Formato": k, "Arquivos": v} for k, v in fmt_counts.most_common()],
-        )
-        st.dataframe(fmt_df, use_container_width=True, hide_index=True)
+    rows = [row for r in results for row in r.rows]
+    if comp["xlsx"] is None:
+        comp["xlsx"] = assemble_output(rows, results)
+    st.download_button(
+        label=f"⬇ Baixar compilado.xlsx ({len(rows)} linhas)",
+        data=comp["xlsx"],
+        file_name="compilado.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="primary",
+    )
 
-    if not dry_run and all_results:
-        output_bytes = assemble_output(all_rows, all_results)
-        st.download_button(
-            label="⬇ Baixar compilado.xlsx",
-            data=output_bytes,
-            file_name="compilado.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary",
-        )
+    pending = [r for r in results if r.status == "unidentified"]
+    if pending:
+        _render_pendentes(comp, pending)
 
-        # Download unidentified report
-        unidentified = [r for r in all_results if r.status in ("unidentified", "error")]
-        if unidentified:
-            unid_lines = "\n".join(
-                f"{Path(r.path).name}\t{r.status}\t{r.error or ''}" for r in unidentified
-            )
-            st.download_button(
-                label="⬇ Baixar relatório de não identificados (.txt)",
-                data=unid_lines,
-                file_name="nao_identificados.txt",
-                mime="text/plain",
-            )
-    elif dry_run:
-        st.info("Dry run ativo — nenhum arquivo foi escrito.")
+    with st.expander("Detalhe por arquivo"):
+        st.dataframe(pd.DataFrame([{
+            "status": _status_icon(r.status),
+            "arquivo": Path(r.path).name,
+            "modelo": r.format_id or "—",
+            "confiança": f"{r.confidence:.2f}" if r.format_id else "—",
+            "linhas": r.rows_extracted,
+            "erro": r.error or "",
+        } for r in results]), use_container_width=True, hide_index=True)
+
+
+def _render_pendentes(comp: dict, pending: list) -> None:
+    import hashlib
+
+    groups: dict[str, list] = {}
+    for r in pending:
+        groups.setdefault(r.layout_key, []).append(r)
+
+    st.subheader(f"🆕 Modelos ainda não cadastrados ({len(groups)})")
+    st.caption(
+        "Arquivos com o mesmo layout estão agrupados. Cadastre o modelo uma vez e todos os arquivos "
+        "do grupo entram na compilação."
+    )
+    for i, (layout, files) in enumerate(groups.items()):
+        columns = layout.replace("|", " · ")
+        title = f"{len(files)} arquivo(s) · colunas: {columns[:110]}{'…' if len(columns) > 110 else ''}"
+        with st.expander(title, expanded=len(groups) == 1):
+            shown = ", ".join(Path(r.path).name for r in files[:5])
+            st.caption(f"Arquivos: {shown}{' …' if len(files) > 5 else ''}")
+            key = "grp_" + hashlib.md5(layout.encode()).hexdigest()[:8]
+            entry = _learn_ui(Path(files[0].path), key=key, sheet_hint=files[0].sheet_name)
+            if entry:
+                before = len(pending)
+                _reprocess_pending(comp)
+                absorbed = before - sum(1 for r in comp["results"] if r.status == "unidentified")
+                st.session_state["_flash"] = (
+                    f"✅ Modelo '{entry.display_name}' cadastrado. {absorbed} arquivo(s) passaram a ser reconhecidos."
+                )
+                st.rerun()
+
+
+# ── Tab: Novo modelo ──────────────────────────────────────────────────────────
+
+def tab_novo_modelo():
+    st.header("🧠 Cadastrar novo modelo")
+    st.markdown(
+        "Envie uma planilha de exemplo. O sistema sugere a correspondência entre as colunas dela e as "
+        "**colunas padrão**; você confere, dá um nome e salva. Dali em diante, qualquer planilha com esse "
+        "layout é reconhecida automaticamente."
+    )
+    uploaded = st.file_uploader("Planilha de exemplo (.xlsx)", type=["xlsx"], key="novo_upload")
+    if not uploaded:
+        return
+    entry = _learn_ui(_save_upload(uploaded), key="novo", check_existing=True)
+    if entry:
+        st.session_state["_flash"] = f"✅ Modelo '{entry.display_name}' cadastrado."
+        st.rerun()
 
 
 # ── Tab 2: Converter PDF ──────────────────────────────────────────────────────
@@ -350,7 +518,7 @@ def tab_catalogo():
         ]
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     else:
-        st.info("Catálogo vazio. Adicione formatos usando o painel abaixo.")
+        st.info("Catálogo vazio. Cadastre modelos na aba 🧠 Novo modelo ou direto ao compilar uma pasta.")
 
     st.divider()
 
@@ -362,30 +530,48 @@ def tab_catalogo():
         entry = catalog.get(selected)
         if entry:
             st.json(json.loads(entry.model_dump_json()))
+            r1, r2 = st.columns([1, 3])
+            confirm = r1.checkbox("Confirmar remoção", key="rm_confirm")
+            if r2.button("🗑 Remover este modelo", disabled=not confirm):
+                from compilador.catalog.loader import remove_format
+                remove_format(selected)
+                st.session_state["_flash"] = f"Modelo '{selected}' removido do catálogo."
+                st.rerun()
     else:
         st.info("Nenhum formato disponível para inspecionar.")
 
     st.divider()
 
-    # Add new format
-    st.subheader("Adicionar novo formato")
-    st.markdown(
-        "Faça upload de um arquivo `.json` seguindo o [schema do catálogo]"
-        "(veja um dos formatos acima como exemplo)."
+    # Standard columns
+    st.subheader("Colunas padrão")
+    st.caption("Todo modelo é mapeado para estas colunas. Novas colunas são criadas na aba 🧠 Novo modelo.")
+    from compilador.catalog.schema import load_schema
+    st.dataframe(
+        pd.DataFrame([
+            {"Coluna": f.label, "Tipo": {"text": "Texto", "number": "Número", "date": "Data"}[f.type],
+             "Nome interno": f.name}
+            for f in load_schema().fields
+        ]),
+        use_container_width=True, hide_index=True,
     )
-    new_fmt_file = st.file_uploader("Arquivo JSON do novo formato", type=["json"], key="new_fmt")
-    if new_fmt_file and st.button("➕ Adicionar ao catálogo"):
-        try:
-            from compilador.catalog.loader import load_format_from_file, append_format
-            with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="wb") as tmp:
-                tmp.write(new_fmt_file.read())
-                tmp_path = tmp.name
-            entry = load_format_from_file(tmp_path)
-            updated = append_format(entry)
-            st.success(f"✅ Formato '{entry.format_id}' adicionado. Catálogo agora tem {len(updated.formats)} formatos.")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Erro ao adicionar formato: {e}")
+
+    st.divider()
+
+    # Add new format (advanced)
+    with st.expander("Avançado: importar modelo de um arquivo JSON"):
+        new_fmt_file = st.file_uploader("Arquivo JSON do novo formato", type=["json"], key="new_fmt")
+        if new_fmt_file and st.button("➕ Adicionar ao catálogo"):
+            try:
+                from compilador.catalog.loader import load_format_from_file, append_format
+                with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="wb") as tmp:
+                    tmp.write(new_fmt_file.read())
+                    tmp_path = tmp.name
+                entry = load_format_from_file(tmp_path)
+                updated = append_format(entry)
+                st.success(f"✅ Formato '{entry.format_id}' adicionado. Catálogo agora tem {len(updated.formats)} formatos.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Erro ao adicionar formato: {e}")
 
     st.divider()
 
@@ -555,12 +741,18 @@ def main():
             f"Para converter PDFs escaneados, acesse a aba **⚙️ Configuração**.",
         )
 
-    tab1, tab2, tab3, tab4 = st.tabs(
-        ["📊 Compilar .xlsx", "📄 Converter PDF", "📚 Catálogo", "⚙️ Configuração"]
+    flash = st.session_state.pop("_flash", None)
+    if flash:
+        st.success(flash)
+
+    tab1, tab_novo, tab2, tab3, tab4 = st.tabs(
+        ["📊 Compilar .xlsx", "🧠 Novo modelo", "📄 Converter PDF", "📚 Catálogo", "⚙️ Configuração"]
     )
 
     with tab1:
         tab_compilar()
+    with tab_novo:
+        tab_novo_modelo()
     with tab2:
         tab_converter_pdf()
     with tab3:

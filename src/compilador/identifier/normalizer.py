@@ -11,6 +11,11 @@ def normalize(text: str) -> str:
     return text
 
 
+def slugify(text: str) -> str:
+    """normalize() + tudo que não é alfanumérico vira '_'. Ex.: 'Valor Unit.' -> 'valor_unit'."""
+    return re.sub(r"[^a-z0-9]+", "_", normalize(text)).strip("_")
+
+
 def normalize_row(row: list[str]) -> list[str]:
     return [normalize(str(cell)) for cell in row]
 

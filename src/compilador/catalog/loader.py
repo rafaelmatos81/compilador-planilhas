@@ -40,6 +40,15 @@ def append_format(entry: FormatEntry, path: Path | str | None = None) -> Catalog
     return catalog
 
 
+def remove_format(format_id: str, path: Path | str | None = None) -> CatalogManifest:
+    catalog = load_catalog(path)
+    if format_id not in catalog.ids():
+        raise CatalogError(f"format_id '{format_id}' not found in catalog")
+    catalog.formats = [f for f in catalog.formats if f.format_id != format_id]
+    save_catalog(catalog, path)
+    return catalog
+
+
 def load_format_from_file(json_path: Path | str) -> FormatEntry:
     data = json.loads(Path(json_path).read_text(encoding="utf-8"))
     return FormatEntry.model_validate(data)
