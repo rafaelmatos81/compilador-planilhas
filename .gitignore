@@ -1,0 +1,23 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# Streamlit cache
+.streamlit/cache/
+
+# Logs e saídas geradas
+*.log
+saida/
+output/
+
+# Ambiente local
+.env

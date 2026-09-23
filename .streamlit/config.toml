@@ -1,0 +1,6 @@
+[browser]
+gatherUsageStats = false
+
+[server]
+# headless=true suprime o prompt de e-mail e deixa os launchers controlarem o navegador
+headless = true

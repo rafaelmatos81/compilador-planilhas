@@ -1,0 +1,220 @@
+{
+  "catalog_version": "1.0",
+  "last_updated": "2026-09-23",
+  "formats": [
+    {
+      "format_id": "dnit_boletim_medicao_v1",
+      "display_name": "Boletim de Medição DNIT",
+      "agency": "DNIT",
+      "document_type": "MEDICAO",
+      "version": "2022",
+      "description": "Boletim padrão DNIT para medição de obras rodoviárias federais. Cabeçalho com contrato, trecho e período. Linhas por item de serviço com quantidade medida, acumulada e valores.",
+      "detection": {
+        "header_anchors": [
+          {
+            "text": "BOLETIM DE MEDIÇÃO",
+            "match_mode": "contains",
+            "scope": "first_N_rows",
+            "first_N": 8,
+            "weight": 2.0,
+            "required": true
+          },
+          {
+            "text": "DNIT",
+            "match_mode": "contains",
+            "scope": "first_N_rows",
+            "first_N": 5,
+            "weight": 1.5,
+            "required": false
+          }
+        ],
+        "column_anchors": [
+          {
+            "canonical_name": "item",
+            "aliases": ["Item", "Nº", "Código"],
+            "fuzzy_threshold": 80,
+            "weight": 1.0,
+            "required": true
+          },
+          {
+            "canonical_name": "descricao",
+            "aliases": ["Descrição", "Serviço", "Discriminação"],
+            "fuzzy_threshold": 78,
+            "weight": 1.0,
+            "required": true
+          },
+          {
+            "canonical_name": "unidade",
+            "aliases": ["Un", "Und", "Unidade"],
+            "fuzzy_threshold": 80,
+            "weight": 0.8,
+            "required": false
+          },
+          {
+            "canonical_name": "qtd_medida",
+            "aliases": ["Qtd Medida", "Medição", "Quantidade Medida"],
+            "fuzzy_threshold": 75,
+            "weight": 1.2,
+            "required": true
+          },
+          {
+            "canonical_name": "valor_unit",
+            "aliases": ["P. Unit.", "R$ Unit.", "Preço Unit."],
+            "fuzzy_threshold": 75,
+            "weight": 0.9,
+            "required": false
+          },
+          {
+            "canonical_name": "valor_total",
+            "aliases": ["Total", "Valor Total", "R$ Total"],
+            "fuzzy_threshold": 80,
+            "weight": 1.0,
+            "required": false
+          }
+        ],
+        "cell_anchors": [
+          {
+            "row": 1,
+            "col": null,
+            "text": "DEPARTAMENTO NACIONAL DE INFRAESTRUTURA DE TRANSPORTES",
+            "match_mode": "contains",
+            "weight": 2.5
+          }
+        ],
+        "structure_hints": {
+          "min_columns": 5,
+          "max_columns": 20,
+          "min_data_rows": 3,
+          "has_merged_header": true
+        }
+      },
+      "extraction": {
+        "header_row": 7,
+        "data_start_row": 8,
+        "sheet_selector": "first",
+        "sheet_name": null,
+        "sheet_pattern": null,
+        "column_map": {
+          "item": "Item",
+          "descricao": "Descrição",
+          "unidade": "Un",
+          "qtd_medida": "Qtd Medida",
+          "valor_unit": "P. Unit.",
+          "valor_total": "Total"
+        },
+        "skip_rows_containing": ["TOTAL GERAL", "SUBTOTAL", "BDI"]
+      }
+    },
+    {
+      "format_id": "sabesp_rdo_v1",
+      "display_name": "Relatório Diário de Obra SABESP",
+      "agency": "SABESP",
+      "document_type": "RDO",
+      "version": "2023",
+      "description": "Relatório Diário de Obra padrão SABESP. Contém data, turno, equipe, atividades executadas e observações.",
+      "detection": {
+        "header_anchors": [
+          {
+            "text": "RELATÓRIO DIÁRIO DE OBRA",
+            "match_mode": "contains",
+            "scope": "first_N_rows",
+            "first_N": 8,
+            "weight": 2.0,
+            "required": true
+          },
+          {
+            "text": "SABESP",
+            "match_mode": "contains",
+            "scope": "first_N_rows",
+            "first_N": 5,
+            "weight": 1.5,
+            "required": false
+          },
+          {
+            "text": "RDO",
+            "match_mode": "contains",
+            "scope": "first_N_rows",
+            "first_N": 5,
+            "weight": 1.0,
+            "required": false
+          }
+        ],
+        "column_anchors": [
+          {
+            "canonical_name": "data",
+            "aliases": ["Data", "Data de Execução", "Dt. Execução"],
+            "fuzzy_threshold": 80,
+            "weight": 1.0,
+            "required": true
+          },
+          {
+            "canonical_name": "turno",
+            "aliases": ["Turno", "Período"],
+            "fuzzy_threshold": 80,
+            "weight": 0.8,
+            "required": false
+          },
+          {
+            "canonical_name": "responsavel",
+            "aliases": ["Responsável", "Resp. Técnico", "Engenheiro Responsável"],
+            "fuzzy_threshold": 78,
+            "weight": 1.0,
+            "required": false
+          },
+          {
+            "canonical_name": "atividade",
+            "aliases": ["Atividade", "Serviço Executado", "Descrição da Atividade"],
+            "fuzzy_threshold": 75,
+            "weight": 1.2,
+            "required": true
+          },
+          {
+            "canonical_name": "equipe",
+            "aliases": ["Equipe", "Mão de Obra", "Pessoal"],
+            "fuzzy_threshold": 78,
+            "weight": 0.9,
+            "required": false
+          },
+          {
+            "canonical_name": "observacoes",
+            "aliases": ["Observações", "Obs.", "Ocorrências"],
+            "fuzzy_threshold": 80,
+            "weight": 0.7,
+            "required": false
+          }
+        ],
+        "cell_anchors": [
+          {
+            "row": 1,
+            "col": null,
+            "text": "COMPANHIA DE SANEAMENTO BÁSICO DO ESTADO DE SÃO PAULO",
+            "match_mode": "contains",
+            "weight": 2.5
+          }
+        ],
+        "structure_hints": {
+          "min_columns": 4,
+          "max_columns": 15,
+          "min_data_rows": 2,
+          "has_merged_header": true
+        }
+      },
+      "extraction": {
+        "header_row": 6,
+        "data_start_row": 7,
+        "sheet_selector": "first",
+        "sheet_name": null,
+        "sheet_pattern": null,
+        "column_map": {
+          "data": "Data",
+          "turno": "Turno",
+          "responsavel": "Responsável",
+          "atividade": "Atividade",
+          "equipe": "Equipe",
+          "observacoes": "Observações"
+        },
+        "skip_rows_containing": ["TOTAL", "SUBTOTAL"]
+      }
+    }
+  ]
+}
