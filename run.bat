@@ -37,10 +37,10 @@ if not defined PY (
 )
 for /f "tokens=*" %%v in ('!PY! --version 2^>^&1') do echo   Python: %%v
 
-:: -- 2. Criar ambiente virtual (apenas na primeira vez) --
+:: -- 2. Criar ambiente virtual - apenas na primeira vez --
 if not exist "%PYTHON_BIN%" (
     echo.
-    echo   Configurando ambiente (primeira vez, aguarde)...
+    echo   Configurando ambiente - primeira vez, aguarde...
     !PY! -m venv "%VENV%"
     if errorlevel 1 (
         echo.
