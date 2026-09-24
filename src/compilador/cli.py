@@ -63,13 +63,16 @@ def convert_pdf(
 ) -> None:
     """Converter PDF(s) para .xlsx usando o catálogo de formatos."""
     from .pdf_converter.pipeline import extract_tables
-    from .identifier.scorer import best_match
+    from .identifier.scorer import best_match_among
     from .catalog.loader import load_catalog
-    from .compiler.extractor import extract
+    from .catalog.schema import load_schema
+    from .compiler.extractor import extract, extract_auto
     from .compiler.assembler import assemble_output
     from .common.models import FileResult
+    from .config import settings
 
     catalog = load_catalog()
+    schema = load_schema()
     pdfs = sorted(input_path.glob("*.pdf")) if input_path.is_dir() else [input_path]
     if sample:
         pdfs = pdfs[:sample]
@@ -85,21 +88,29 @@ def convert_pdf(
                 result.error = "no tables extracted"
                 all_results.append(result)
                 continue
-            match = best_match(tables[0], catalog)
-            if not match or match.confidence < 0.40:
-                result.confidence = match.confidence if match else 0.0
+            best_score, best_table = best_match_among(tables, catalog)
+            if best_score is None or best_score.confidence < settings.confidence_medium:
+                # Sem modelo cadastrado (ou confiança insuficiente): extrai mesmo assim
+                # com mapeamento automático. Cadastrar um modelo é só um diferencial.
+                result.confidence = best_score.confidence if best_score else 0.0
+                layout_table = best_table or max(tables, key=len)
+                rows = extract_auto(layout_table, schema)
+                for row in rows:
+                    row.ocr_used = ocr_used
+                all_rows.extend(rows)
+                result.rows_extracted = len(rows)
                 all_results.append(result)
                 continue
-            fmt = catalog.get(match.format_id)
-            rows = extract(tables[0], fmt)
+            fmt = catalog.get(best_score.format_id)
+            rows = extract(best_table, fmt)
             for row in rows:
-                row.confidence = match.confidence
+                row.confidence = best_score.confidence
                 row.ocr_used = ocr_used
-                row.needs_review = match.confidence < 0.85
+                row.needs_review = best_score.confidence < settings.confidence_high
             all_rows.extend(rows)
-            result.format_id = match.format_id
-            result.confidence = match.confidence
-            result.needs_review = match.confidence < 0.85
+            result.format_id = best_score.format_id
+            result.confidence = best_score.confidence
+            result.needs_review = best_score.confidence < settings.confidence_high
             result.rows_extracted = len(rows)
         except Exception as e:
             result.error = str(e)

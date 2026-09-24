@@ -197,9 +197,11 @@ _COMP = "compilacao"
 def tab_compilar():
     st.header("📊 Compilar arquivos .xlsx")
     st.markdown(
-        "Selecione uma pasta local. Cada arquivo é reconhecido pelo modelo cadastrado e suas colunas "
-        "são levadas para as **colunas padrão**, tudo em um único `.xlsx`. Arquivos de modelos ainda "
-        "desconhecidos aparecem agrupados para você cadastrar o modelo na hora."
+        "Selecione uma pasta local. Arquivos de modelos cadastrados têm suas colunas levadas para as "
+        "**colunas padrão**; arquivos de modelos ainda desconhecidos também entram no compilado, com "
+        "as colunas originais e marcados para revisão — cadastrar o modelo é opcional e serve para "
+        "padronizar essas colunas e aumentar a confiança das próximas planilhas iguais. Tudo sai em um "
+        "único `.xlsx`."
     )
 
     col1, col2 = st.columns([3, 1])
@@ -359,7 +361,11 @@ def tab_novo_modelo():
 
 def tab_converter_pdf():
     st.header("📄 Converter PDFs para .xlsx")
-    st.markdown("Faça upload de um ou mais PDFs. O sistema identificará o formato e extrairá as tabelas, com fallback para OCR quando necessário.")
+    st.markdown(
+        "Faça upload de um ou mais PDFs. O sistema tenta identificar o formato pelo catálogo para usar "
+        "as **colunas padrão**; PDFs de modelos ainda não cadastrados são convertidos do mesmo jeito, "
+        "com as colunas originais e marcados para revisão. Fallback para OCR quando necessário."
+    )
 
     uploaded_files = st.file_uploader(
         "Selecionar PDFs",
@@ -391,13 +397,16 @@ def tab_converter_pdf():
             st.warning("⚠️ pdf2image/pytesseract não instalados — OCR indisponível. A conversão usará apenas pdfplumber e camelot.")
 
     from compilador.pdf_converter.pipeline import extract_tables
-    from compilador.identifier.scorer import best_match
+    from compilador.identifier.scorer import best_match_among
     from compilador.catalog.loader import load_catalog
-    from compilador.compiler.extractor import extract
+    from compilador.catalog.schema import load_schema
+    from compilador.compiler.extractor import extract, extract_auto
     from compilador.compiler.assembler import assemble_output
     from compilador.common.models import FileResult
+    from compilador.config import settings
 
     catalog = load_catalog()
+    schema = load_schema()
     total = len(uploaded_files)
     progress = st.progress(0, text=f"📊 Progresso geral: 0 / {total}")
     current_text = st.empty()
@@ -425,20 +434,29 @@ def tab_converter_pdf():
                 if not tables:
                     result.error = "nenhuma tabela extraída"
                 else:
-                    match = best_match(tables[0], catalog)
-                    if not match or match.confidence < 0.40:
-                        result.confidence = match.confidence if match else 0.0
-                    else:
-                        fmt = catalog.get(match.format_id)
-                        rows = extract(tables[0], fmt)
+                    best_score, best_table = best_match_among(tables, catalog)
+                    if best_score is None or best_score.confidence < settings.confidence_medium:
+                        # Sem modelo cadastrado (ou confiança insuficiente): extrai mesmo
+                        # assim com mapeamento automático das colunas. Cadastrar um modelo
+                        # continua sendo um diferencial, não um pré-requisito.
+                        result.confidence = best_score.confidence if best_score else 0.0
+                        layout_table = best_table or max(tables, key=len)
+                        rows = extract_auto(layout_table, schema)
                         for row in rows:
-                            row.confidence = match.confidence
                             row.ocr_used = ocr_used
-                            row.needs_review = match.confidence < 0.85
                         all_rows.extend(rows)
-                        result.format_id = match.format_id
-                        result.confidence = match.confidence
-                        result.needs_review = match.confidence < 0.85
+                        result.rows_extracted = len(rows)
+                    else:
+                        fmt = catalog.get(best_score.format_id)
+                        rows = extract(best_table, fmt)
+                        for row in rows:
+                            row.confidence = best_score.confidence
+                            row.ocr_used = ocr_used
+                            row.needs_review = best_score.confidence < settings.confidence_high
+                        all_rows.extend(rows)
+                        result.format_id = best_score.format_id
+                        result.confidence = best_score.confidence
+                        result.needs_review = best_score.confidence < settings.confidence_high
                         result.rows_extracted = len(rows)
             except Exception as e:
                 result.error = str(e)

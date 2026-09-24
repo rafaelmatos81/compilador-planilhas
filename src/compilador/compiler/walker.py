@@ -4,10 +4,11 @@ from loguru import logger
 from ..common.models import ProgressEvent, FileResult
 from ..config import settings
 from .reader import read_xlsx
-from .extractor import extract
-from ..identifier.scorer import best_match
+from .extractor import extract, extract_auto
+from ..identifier.scorer import best_match_among
 from ..catalog.loader import load_catalog
 from ..catalog.models import CatalogManifest
+from ..catalog.schema import load_schema
 from ..common.exceptions import UnreadableFile
 from ..learner import layout_signature
 
@@ -54,13 +55,7 @@ def _process_file(path: Path, catalog, confidence_threshold: float) -> FileResul
             result.error = "no readable sheets"
             return result
 
-        best_score = None
-        best_table = None
-        for table in tables:
-            match = best_match(table, catalog)
-            if match and (best_score is None or match.confidence > best_score.confidence):
-                best_score = match
-                best_table = table
+        best_score, best_table = best_match_among(tables, catalog)
 
         if best_score is None or best_score.confidence < confidence_threshold:
             result.confidence = best_score.confidence if best_score else 0.0
@@ -68,7 +63,18 @@ def _process_file(path: Path, catalog, confidence_threshold: float) -> FileResul
             layout_table = best_table or max(tables, key=len)
             result.layout_key = layout_signature(layout_table)
             result.sheet_name = layout_table.sheet_name
-            logger.warning(f"Unidentified: {path.name} (confidence={result.confidence:.2f})")
+            # Sem modelo cadastrado (ou confiança insuficiente): extrai mesmo assim com
+            # mapeamento automático, para que o arquivo sempre produza um resultado.
+            # Cadastrar um modelo continua sendo um diferencial (colunas padronizadas,
+            # maior confiança), não um pré-requisito para a compilação funcionar.
+            rows = extract_auto(layout_table, load_schema())
+            result.rows = rows
+            result.rows_extracted = len(rows)
+            result.sheets_processed = 1
+            logger.warning(
+                f"Sem modelo cadastrado: {path.name} (confidence={result.confidence:.2f}) "
+                f"— {len(rows)} linha(s) extraída(s) automaticamente"
+            )
             return result
 
         result.format_id = best_score.format_id

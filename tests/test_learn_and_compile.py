@@ -62,6 +62,24 @@ def test_sem_modelos_agrupa_por_layout(pasta, tmp_path):
     assert res["a1.xlsx"].layout_key != res["b1.xlsx"].layout_key
 
 
+def test_arquivo_sem_modelo_ainda_produz_linhas(pasta, tmp_path):
+    """Sem nenhum modelo cadastrado, os arquivos são convertidos mesmo assim (cabeçalho e
+    mapeamento de colunas automáticos), em vez de ficarem vazios até alguém cadastrar um
+    modelo — cadastrar um modelo é só um diferencial, não um pré-requisito."""
+    res = _resultados(pasta, tmp_path / "cat.json")
+    assert all(r.status == "unidentified" for r in res.values())
+    assert all(r.rows_extracted > 0 for r in res.values())
+
+    rows = [row for r in res.values() for row in r.rows]
+    assert all(row.needs_review for row in rows)
+    assert all(row.format_id == "" for row in rows)
+
+    df = pd.read_excel(io.BytesIO(assemble_output(rows, list(res.values()))), sheet_name="Dados")
+    assert len(df) == len(rows)
+    # "Descrição do Serviço" é reconhecida automaticamente como a coluna padrão "Descrição"
+    assert "Descrição" in df.columns
+
+
 def test_aprende_modelo_e_reconhece_arquivos_do_mesmo_layout(pasta, tmp_path):
     cat = tmp_path / "cat.json"
     schema = load_schema()

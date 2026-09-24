@@ -1,7 +1,9 @@
 import re
 from ..common.models import ParsedTable, CanonicalRow
 from ..catalog.models import FormatEntry
+from ..catalog.schema import CanonicalSchema
 from ..identifier.normalizer import normalize, find_header_row_index
+from ..learner import suggest_mapping, DEFAULT_SKIP_ROWS
 
 _HEADER_SCAN_ROWS = 30
 
@@ -36,6 +38,55 @@ def extract(table: ParsedTable, fmt: FormatEntry) -> list[CanonicalRow]:
             confidence=0.0,
             ocr_used=False,
             needs_review=False,
+            row_index_in_source=row_idx,
+            data=data,
+        ))
+    return canonical_rows
+
+
+def extract_auto(table: ParsedTable, schema: CanonicalSchema) -> list[CanonicalRow]:
+    """Extrai linhas de uma tabela sem modelo cadastrado no catálogo.
+
+    Cabeçalho e mapeamento de colunas são detectados automaticamente: colunas cujo
+    título corresponde a uma coluna padrão (por nome ou apelido) são mapeadas para ela;
+    as demais mantêm o título original da planilha, para não perder nenhuma informação.
+    Usado como retaguarda para que qualquer arquivo produza um resultado, mesmo sem
+    modelo cadastrado — cadastrar um modelo é só um diferencial para padronizar e
+    aumentar a confiança das próximas planilhas do mesmo layout.
+    """
+    rows = table.rows
+    if not rows:
+        return []
+    header_idx = find_header_row_index(rows)
+    header = rows[header_idx]
+    suggestions = suggest_mapping(header, schema)
+
+    col_map: dict[str, int] = {}
+    used_keys: set[str] = set()
+    for idx, title in enumerate(header):
+        if not title.strip():
+            continue
+        key = suggestions.get(idx) or title.strip()
+        if key in used_keys:
+            key = f"{key} #{idx + 1}"
+        used_keys.add(key)
+        col_map[key] = idx
+
+    skip = [normalize(s) for s in DEFAULT_SKIP_ROWS]
+    canonical_rows = []
+    for row_idx, row in enumerate(rows[header_idx + 1:], start=header_idx + 2):
+        if _should_skip(row, skip):
+            continue
+        data = {key: (row[idx] if idx < len(row) else "") for key, idx in col_map.items()}
+        if not any(str(v).strip() for v in data.values()):
+            continue
+        canonical_rows.append(CanonicalRow(
+            source_file=table.source_file,
+            source_sheet=table.sheet_name,
+            format_id="",
+            confidence=0.0,
+            ocr_used=False,
+            needs_review=True,
             row_index_in_source=row_idx,
             data=data,
         ))

@@ -18,6 +18,22 @@ def best_match(table: ParsedTable, catalog: CatalogManifest) -> ScoredMatch | No
     return matches[0] if matches else None
 
 
+def best_match_among(
+    tables: list[ParsedTable], catalog: CatalogManifest
+) -> tuple[ScoredMatch | None, ParsedTable | None]:
+    """Score every table/sheet from a file and return the best match with its table.
+
+    Usado quando um arquivo produz mais de uma tabela (abas de planilha, ou múltiplas
+    tabelas extraídas de um PDF) e não se sabe de antemão qual delas casa com um modelo.
+    """
+    best_score, best_table = None, None
+    for table in tables:
+        match = best_match(table, catalog)
+        if match and (best_score is None or match.confidence > best_score.confidence):
+            best_score, best_table = match, table
+    return best_score, best_table
+
+
 def _score_entry(norm_rows: list[list[str]], entry: FormatEntry) -> ScoredMatch:
     earned = 0.0
     max_possible = 0.0

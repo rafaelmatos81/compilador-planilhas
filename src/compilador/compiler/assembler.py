@@ -75,7 +75,7 @@ def _build_data_frame(canonical_rows: list[CanonicalRow], schema: CanonicalSchem
         rec.update({
             "source_file": Path(r.source_file).name,
             "source_sheet": r.source_sheet,
-            "format_id": r.format_id,
+            "format_id": r.format_id or "auto (sem modelo cadastrado)",
             "confidence": round(r.confidence, 3),
             "needs_review": r.needs_review,
             "ocr_used": r.ocr_used,
