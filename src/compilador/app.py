@@ -500,6 +500,225 @@ def tab_converter_pdf():
         )
 
 
+# ── Tab: Extrair RDOs ──────────────────────────────────────────────────────────
+# Mesmo contrato de campos e mesmas abas de saída da skill "exxata-rdo-extractor"
+# (numero_rdo, data_rdo, clima, equipamentos, mão de obra direta/indireta,
+# atividades, observações). A diferença é só o modo de preenchimento: lá quem lê
+# o texto e monta os campos é uma IA hospedeira; aqui é heurística local (rótulos
+# e tabelas conhecidos) + revisão manual na tela — por isso cada campo que não é
+# reconhecido com segurança fica em branco de propósito, para o usuário completar,
+# em vez de arriscar inventar um valor.
+
+_RDO = "rdo_extracao"
+
+
+def _int_or_zero(value) -> int:
+    try:
+        return int(float(str(value).replace(",", ".").strip()))
+    except (ValueError, TypeError):
+        return 0
+
+
+def _run_rdo_extraction(uploaded_files, mode: str, options: dict) -> None:
+    from compilador.rdo.text_extract import build_groups_from_pdf, build_groups_from_image, build_groups_from_xlsx
+    from compilador.rdo.heuristics import prefill_rdo
+
+    records, texts = [], []
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for uploaded in uploaded_files:
+            tmp_path = Path(tmpdir) / uploaded.name
+            tmp_path.write_bytes(uploaded.read())
+            suffix = tmp_path.suffix.lower()
+            try:
+                if suffix == ".pdf":
+                    groups = build_groups_from_pdf(tmp_path, mode=mode)
+                elif suffix in (".png", ".jpg", ".jpeg"):
+                    groups = build_groups_from_image(tmp_path)
+                elif suffix == ".xlsx":
+                    groups = build_groups_from_xlsx(tmp_path, mode=mode)
+                else:
+                    st.warning(f"Tipo de arquivo não suportado: {uploaded.name}")
+                    continue
+            except Exception as e:
+                st.error(f"Falha ao ler {uploaded.name}: {e}")
+                continue
+            for group in groups:
+                records.append(prefill_rdo(group, options))
+                texts.append(group.text)
+
+    if not records:
+        st.warning("Nenhum RDO encontrado nos arquivos selecionados.")
+        return
+    st.session_state[_RDO] = {"records": records, "options": options, "texts": texts, "xlsx": None}
+    st.rerun()
+
+
+def tab_extrair_rdos():
+    st.header("🧾 Extrair RDOs")
+    st.markdown(
+        "Mesmo contrato de campos e mesmas abas de saída da skill **exxata-rdo-extractor** "
+        "(número, data, clima, equipamentos, mão de obra direta/indireta, atividades e observações). "
+        "O pré-preenchimento aqui é feito por heurística local (rótulos e tabelas conhecidos do "
+        "documento), não por IA — por isso **revise cada RDO na tela** antes de baixar. Um campo em "
+        "branco significa que a heurística não encontrou o dado com segurança, não que ele não existe."
+    )
+
+    uploaded_files = st.file_uploader(
+        "Selecionar RDOs (PDF, imagem ou .xlsx)",
+        type=["pdf", "png", "jpg", "jpeg", "xlsx"],
+        accept_multiple_files=True,
+        key="rdo_upload",
+    )
+
+    st.markdown("**O que extrair** (igual às opções da skill)")
+    c1, c2, c3, c4 = st.columns(4)
+    opt_clima = c1.checkbox("Clima", value=True, key="rdo_opt_clima")
+    opt_equip = c2.checkbox("Equipamentos", value=True, key="rdo_opt_equip")
+    opt_mao = c3.checkbox("Mão de obra", value=True, key="rdo_opt_mao")
+    opt_ativ = c4.checkbox("Atividades/Observações", value=True, key="rdo_opt_ativ")
+
+    modo_label = st.radio(
+        "Agrupamento",
+        ["Cada arquivo é um RDO", "Cada página/aba é um RDO separado"],
+        horizontal=True, key="rdo_modo",
+        help="Use 'cada página' quando o PDF/planilha reúne vários RDOs de dias diferentes.",
+    )
+    mode = "split" if modo_label.startswith("Cada página") else "merge"
+    options = {"clima": opt_clima, "equipamentos": opt_equip, "maoDeObra": opt_mao, "atividades": opt_ativ}
+
+    if st.button("▶ Extrair e pré-preencher", type="primary", use_container_width=True, disabled=not uploaded_files):
+        _run_rdo_extraction(uploaded_files, mode, options)
+
+    state = st.session_state.get(_RDO)
+    if state:
+        _render_rdo_review(state)
+
+
+def _render_rdo_review(state: dict) -> None:
+    from dataclasses import asdict
+    from compilador.rdo.models import EquipamentoItem, MaoDeObraItem, AtividadeItem, ObservacaoItem
+    from compilador.rdo.export import export_rdo_workbook_bytes
+
+    records = state["records"]
+    options = state["options"]
+    texts = state["texts"]
+
+    st.divider()
+    st.subheader(f"📝 Revisão ({len(records)} RDO(s))")
+    st.caption("Nada é gravado até você clicar em baixar. Adicione/remova linhas das tabelas normalmente.")
+
+    for i, r in enumerate(records):
+        label = r.source_file + (f" — pág. {r.source_pages}" if r.source_pages else "")
+        with st.expander(f"RDO {i + 1} · {label}", expanded=len(records) == 1):
+            c1, c2, c3 = st.columns(3)
+            r.numero_rdo = c1.text_input("Número do RDO", r.numero_rdo, key=f"rdo_{i}_num")
+            r.data_rdo = c2.text_input("Data (AAAA-MM-DD)", r.data_rdo, key=f"rdo_{i}_data")
+            r.horario_trabalho = c3.text_input("Horário de trabalho", r.horario_trabalho, key=f"rdo_{i}_hora")
+            c4, c5, c6 = st.columns(3)
+            r.local_obra = c4.text_input("Local da obra", r.local_obra, key=f"rdo_{i}_local")
+            r.contratante = c5.text_input("Contratante", r.contratante, key=f"rdo_{i}_contratante")
+            r.contratada = c6.text_input("Contratada", r.contratada, key=f"rdo_{i}_contratada")
+
+            if options.get("clima"):
+                st.markdown("**☁️ Clima**")
+                cc1, cc2, cc3 = st.columns(3)
+                r.clima.manha = cc1.text_input("Manhã", r.clima.manha, key=f"rdo_{i}_cm")
+                r.clima.tarde = cc2.text_input("Tarde", r.clima.tarde, key=f"rdo_{i}_ct")
+                r.clima.noite = cc3.text_input("Noite", r.clima.noite, key=f"rdo_{i}_cn")
+                pc1, pc2, pc3 = st.columns(3)
+                r.clima.pluviometria_manha = pc1.number_input(
+                    "Pluv. manhã (mm)", value=float(r.clima.pluviometria_manha), min_value=0.0, key=f"rdo_{i}_pm"
+                )
+                r.clima.pluviometria_tarde = pc2.number_input(
+                    "Pluv. tarde (mm)", value=float(r.clima.pluviometria_tarde), min_value=0.0, key=f"rdo_{i}_pt"
+                )
+                r.clima.pluviometria_noite = pc3.number_input(
+                    "Pluv. noite (mm)", value=float(r.clima.pluviometria_noite), min_value=0.0, key=f"rdo_{i}_pn"
+                )
+
+            if options.get("equipamentos"):
+                st.markdown("**🚜 Equipamentos**")
+                df = pd.DataFrame([asdict(x) for x in r.equipamentos], columns=["nome", "empresa", "quantidade"])
+                edited = st.data_editor(
+                    df, num_rows="dynamic", use_container_width=True, hide_index=True, key=f"rdo_{i}_equip"
+                )
+                r.equipamentos = [
+                    EquipamentoItem(
+                        nome=row.get("nome") or "", empresa=row.get("empresa") or "",
+                        quantidade=_int_or_zero(row.get("quantidade")),
+                    )
+                    for row in edited.to_dict("records") if any(str(v).strip() for v in row.values() if v is not None)
+                ]
+
+            if options.get("maoDeObra"):
+                st.markdown("**👷 Mão de obra direta**")
+                dfd = pd.DataFrame(
+                    [asdict(x) for x in r.mao_de_obra_direta], columns=["funcao", "empresa", "quantidade"]
+                )
+                editd = st.data_editor(
+                    dfd, num_rows="dynamic", use_container_width=True, hide_index=True, key=f"rdo_{i}_mod"
+                )
+                r.mao_de_obra_direta = [
+                    MaoDeObraItem(
+                        funcao=row.get("funcao") or "", empresa=row.get("empresa") or "",
+                        quantidade=_int_or_zero(row.get("quantidade")),
+                    )
+                    for row in editd.to_dict("records") if any(str(v).strip() for v in row.values() if v is not None)
+                ]
+                st.markdown("**👷 Mão de obra indireta**")
+                dfi = pd.DataFrame(
+                    [asdict(x) for x in r.mao_de_obra_indireta], columns=["funcao", "empresa", "quantidade"]
+                )
+                editi = st.data_editor(
+                    dfi, num_rows="dynamic", use_container_width=True, hide_index=True, key=f"rdo_{i}_moi"
+                )
+                r.mao_de_obra_indireta = [
+                    MaoDeObraItem(
+                        funcao=row.get("funcao") or "", empresa=row.get("empresa") or "",
+                        quantidade=_int_or_zero(row.get("quantidade")),
+                    )
+                    for row in editi.to_dict("records") if any(str(v).strip() for v in row.values() if v is not None)
+                ]
+
+            if options.get("atividades"):
+                st.markdown("**🔧 Atividades**")
+                dfa = pd.DataFrame(
+                    [asdict(x) for x in r.atividades], columns=["secao", "item", "descricao", "empresa"]
+                )
+                edita = st.data_editor(
+                    dfa, num_rows="dynamic", use_container_width=True, hide_index=True, key=f"rdo_{i}_ativ"
+                )
+                r.atividades = [
+                    AtividadeItem(**{k: (row.get(k) or "") for k in ("secao", "item", "descricao", "empresa")})
+                    for row in edita.to_dict("records") if any(str(v).strip() for v in row.values() if v is not None)
+                ]
+                st.markdown("**🗒️ Observações**")
+                dfo = pd.DataFrame([asdict(x) for x in r.observacoes], columns=["autor", "descricao", "empresa"])
+                edito = st.data_editor(
+                    dfo, num_rows="dynamic", use_container_width=True, hide_index=True, key=f"rdo_{i}_obs"
+                )
+                r.observacoes = [
+                    ObservacaoItem(**{k: (row.get(k) or "") for k in ("autor", "descricao", "empresa")})
+                    for row in edito.to_dict("records") if any(str(v).strip() for v in row.values() if v is not None)
+                ]
+
+            with st.expander("Texto extraído (para conferência)"):
+                st.text((texts[i] or "(sem texto extraído — verifique OCR na aba Configuração)")[:6000])
+
+    st.divider()
+    if st.button("⬇ Gerar rdos.xlsx", type="primary"):
+        state["xlsx"] = export_rdo_workbook_bytes(records)
+
+    if state.get("xlsx"):
+        st.download_button(
+            label="⬇ Baixar rdos.xlsx",
+            data=state["xlsx"],
+            file_name="rdos.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+        )
+
+
 # ── Tab 3: Catálogo ───────────────────────────────────────────────────────────
 
 def tab_catalogo():
@@ -763,8 +982,8 @@ def main():
     if flash:
         st.success(flash)
 
-    tab1, tab_novo, tab2, tab3, tab4 = st.tabs(
-        ["📊 Compilar .xlsx", "🧠 Novo modelo", "📄 Converter PDF", "📚 Catálogo", "⚙️ Configuração"]
+    tab1, tab_novo, tab2, tab_rdo, tab3, tab4 = st.tabs(
+        ["📊 Compilar .xlsx", "🧠 Novo modelo", "📄 Converter PDF", "🧾 Extrair RDOs", "📚 Catálogo", "⚙️ Configuração"]
     )
 
     with tab1:
@@ -773,6 +992,8 @@ def main():
         tab_novo_modelo()
     with tab2:
         tab_converter_pdf()
+    with tab_rdo:
+        tab_extrair_rdos()
     with tab3:
         tab_catalogo()
     with tab4:
